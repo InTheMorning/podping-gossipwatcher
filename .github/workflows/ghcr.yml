@@ -1,0 +1,52 @@
+name: GHCR image
+
+# Builds the listener image of this fork on GitHub and pushes it to GHCR, so a
+# host pulls a built image and keeps no Rust toolchain or build cache. It is a
+# separate file from release.yml, which publishes the upstream image to Docker
+# Hub, so a rebase on upstream does not touch it.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  image:
+    # Only in this fork. Upstream publishes with release.yml.
+    if: github.repository_owner == 'InTheMorning'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # main and sha-<commit> for each push to main; the version for a tag.
+      # Pin sha-<commit> on a host, so it is clear which build runs.
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/podping-gossipwatcher
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short
+            type=semver,pattern={{version}}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
