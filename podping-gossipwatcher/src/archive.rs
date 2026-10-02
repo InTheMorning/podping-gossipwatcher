@@ -83,16 +83,7 @@ impl Archive {
             params![hash_hex, payload, now as i64],
         )?;
 
-        // hour_key for manifest partitioning: "YYYY-MM-DD-HH"
-        let hour_key = {
-            // Simple hour key from unix timestamp
-            let hours_since_epoch = timestamp / 3600;
-            let day = hours_since_epoch / 24;
-            let hour = hours_since_epoch % 24;
-            let days_since_epoch = day;
-            // Approximate date from days since epoch
-            format!("{}-{:02}", days_since_epoch, hour)
-        };
+        let hour_key = hour_key(timestamp);
 
         tx.execute(
             "INSERT OR IGNORE INTO manifest (hour_key, hash, sender, medium, reason, timestamp, iri_count)
@@ -111,6 +102,31 @@ impl Archive {
         tx.commit()?;
 
         Ok(inserted > 0)
+    }
+
+    /// Delete up to `batch` messages whose `created_at` is older than `cutoff`
+    /// (unix seconds), and up to `batch` manifest rows of an older hour.
+    /// Returns the number of rows deleted; 0 means nothing older is left.
+    ///
+    /// The caller runs it in a loop and releases the lock between calls, so
+    /// inserts and peer catch-up reads go on while a large backlog is pruned.
+    /// The manifest has no index on its time, but its unique index starts with
+    /// `hour_key`, and those keys sort in time order (see `hour_key`), so the
+    /// manifest delete is a range on that index, not a scan.
+    pub fn prune_before(&self, cutoff: u64, batch: usize) -> Result<usize, Box<dyn Error>> {
+        let messages = self.conn.execute(
+            "DELETE FROM messages WHERE rowid IN (
+                 SELECT rowid FROM messages WHERE created_at < ?1 LIMIT ?2
+             )",
+            params![cutoff as i64, batch as i64],
+        )?;
+        let manifest = self.conn.execute(
+            "DELETE FROM manifest WHERE rowid IN (
+                 SELECT rowid FROM manifest WHERE hour_key < ?1 LIMIT ?2
+             )",
+            params![hour_key(cutoff), batch as i64],
+        )?;
+        Ok(messages + manifest)
     }
 
     /// Return up to `limit` message payloads whose `created_at >= since`
@@ -142,6 +158,15 @@ impl Archive {
 
         Ok(result.map(|ts| ts as u64))
     }
+}
+
+/// The manifest partition key of a unix timestamp: days since the epoch and
+/// the hour, as `"DDDDD-HH"`. The day count has five digits from 1997 to 2243,
+/// so in that range the keys sort as text in time order, which
+/// `Archive::prune_before` relies on.
+fn hour_key(timestamp: u64) -> String {
+    let hours_since_epoch = timestamp / 3600;
+    format!("{}-{:02}", hours_since_epoch / 24, hours_since_epoch % 24)
 }
 
 #[cfg(test)]
@@ -226,6 +251,60 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    fn count(db: &Archive, table: &str) -> i64 {
+        db.conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn prune_before_deletes_only_older_messages_and_manifest_rows() {
+        let tmp = TempDb::new("prune");
+        let db = Archive::open(tmp.path()).unwrap();
+        let day = 86_400;
+        let now = 1_790_000_000;
+        for i in 0..3u64 {
+            store_at(&db, format!("old-{i}").as_bytes(), now - 40 * day + i);
+            store_at(&db, format!("new-{i}").as_bytes(), now - day + i);
+        }
+
+        let mut deleted = 0;
+        loop {
+            let n = db.prune_before(now - 30 * day, 1000).unwrap();
+            if n == 0 {
+                break;
+            }
+            deleted += n;
+        }
+
+        assert_eq!(deleted, 6, "three messages and their three manifest rows");
+        assert_eq!(count(&db, "messages"), 3);
+        assert_eq!(count(&db, "manifest"), 3);
+        let left = db.messages_since(0, 100).unwrap();
+        assert!(left.iter().all(|p| p.starts_with(b"new-")));
+    }
+
+    #[test]
+    fn prune_before_deletes_at_most_one_batch_per_call() {
+        let tmp = TempDb::new("prune-batch");
+        let db = Archive::open(tmp.path()).unwrap();
+        for i in 0..5u64 {
+            store_at(&db, format!("old-{i}").as_bytes(), 1_000 + i);
+        }
+
+        assert_eq!(db.prune_before(1_000_000, 2).unwrap(), 4, "2 messages and 2 manifest rows");
+        assert_eq!(count(&db, "messages"), 3);
+    }
+
+    #[test]
+    fn hour_keys_sort_in_time_order() {
+        let earlier = hour_key(1_790_000_000);
+        let later = hour_key(1_790_000_000 + 3600 * 30);
+        assert!(earlier < later, "{earlier} must sort before {later}");
+        // A single-digit hour is padded, so "20717-09" sorts before "20717-10".
+        assert!(hour_key(20_717 * 86_400 + 9 * 3600) < hour_key(20_717 * 86_400 + 10 * 3600));
     }
 
     #[test]

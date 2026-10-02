@@ -45,6 +45,13 @@ const DEFAULT_BOOTSTRAP_PEER_IDS: &str = concat!(
 const DEFAULT_TRUSTED_PUBLISHERS_FILE: &str = "trusted_publishers.txt";
 const DEFAULT_TRUSTED_MONITORS_FILE: &str = "trusted_monitors.txt";
 const DEFAULT_ARCHIVE_PATH: &str = "listener_archive.db";
+// The archive keeps this many days of notifications. A peer catches up from
+// its own newest notification, or 24 hours back, and gets at most
+// MAX_SYNC_MESSAGES, so 30 days leaves a wide margin. 0 keeps everything.
+const DEFAULT_ARCHIVE_RETENTION_DAYS: u64 = 30;
+// Rows deleted per archive lock; the lock is released between batches.
+const ARCHIVE_PRUNE_BATCH: usize = 5_000;
+const ARCHIVE_PRUNE_INTERVAL_SECS: u64 = 3_600;
 const DEFAULT_PEER_ENDORSE_INTERVAL: u64 = 45;
 const REBOOTSTRAP_TIMEOUT: u64 = 180;
 const REJOIN_INTERVAL_SECS: u64 = 1800; // Re-join peers every 30 minutes to prevent topology drift
@@ -656,6 +663,64 @@ async fn run_catchup(
 }
 
 //Main ---------------------------------------------------------------------------------------------
+/// Parse ARCHIVE_RETENTION_DAYS: unset or not a number gives the default,
+/// and 0 turns pruning off.
+fn archive_retention_days(value: Option<&str>) -> u64 {
+    match value.map(str::trim) {
+        None | Some("") => DEFAULT_ARCHIVE_RETENTION_DAYS,
+        Some(v) => v.parse().unwrap_or_else(|_| {
+            eprintln!(
+                "\x1b[35m[WARN] ARCHIVE_RETENTION_DAYS={:?} is not a number; using {}\x1b[0m",
+                v, DEFAULT_ARCHIVE_RETENTION_DAYS
+            );
+            DEFAULT_ARCHIVE_RETENTION_DAYS
+        }),
+    }
+}
+
+/// Once an hour, delete archived notifications older than `retention_days`.
+/// The lock is held for one batch at a time, so inserts and peer catch-up
+/// reads continue during a large first prune.
+fn spawn_archive_pruner(db: Arc<Mutex<archive::Archive>>, retention_days: u64) {
+    tokio::spawn(async move {
+        loop {
+            let cutoff = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .saturating_sub(retention_days.saturating_mul(86_400));
+            let mut total = 0usize;
+            loop {
+                // The error becomes a String here: Box<dyn Error> is not Send,
+                // and the result lives across the await below.
+                let result = db
+                    .lock()
+                    .unwrap()
+                    .prune_before(cutoff, ARCHIVE_PRUNE_BATCH)
+                    .map_err(|e| e.to_string());
+                match result {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        total += n;
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    Err(e) => {
+                        eprintln!("\x1b[35m[WARN] Archive prune failed: {}\x1b[0m", e);
+                        break;
+                    }
+                }
+            }
+            if total > 0 {
+                println!(
+                    "\x1b[36m[ARCHIVE] Pruned {} rows older than {} days\x1b[0m",
+                    total, retention_days
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(ARCHIVE_PRUNE_INTERVAL_SECS)).await;
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Write tracing output to fd 3 only if TRACE_FD3=1 and fd 3 is a pipe or
@@ -735,6 +800,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(false);
     let archive_path =
         env::var("ARCHIVE_PATH").unwrap_or_else(|_| DEFAULT_ARCHIVE_PATH.to_string());
+    let archive_retention_days = archive_retention_days(env::var("ARCHIVE_RETENTION_DAYS").ok().as_deref());
 
     let trusted_publishers = Arc::new(RwLock::new(load_trusted_publishers(&trusted_publishers_file)));
 
@@ -759,6 +825,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    if let Some(ref db_arc) = db {
+        if archive_retention_days > 0 {
+            println!("  Archive retention: {} days", archive_retention_days);
+            spawn_archive_pruner(Arc::clone(db_arc), archive_retention_days);
+        } else {
+            println!("  Archive retention: keep everything");
+        }
+    }
 
     let catchup_enabled = env::var("CATCHUP_ENABLED")
         .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
@@ -2256,6 +2331,15 @@ fn spawn_receive_task(
 mod tests {
     use super::*;
     use sha2::Digest;
+
+    #[test]
+    fn archive_retention_defaults_to_30_days_and_0_keeps_everything() {
+        assert_eq!(archive_retention_days(None), 30);
+        assert_eq!(archive_retention_days(Some("")), 30);
+        assert_eq!(archive_retention_days(Some("14")), 14);
+        assert_eq!(archive_retention_days(Some("0")), 0);
+        assert_eq!(archive_retention_days(Some("thirty")), 30);
+    }
 
     #[test]
     fn topic_id_matches_sha512_derivation() {

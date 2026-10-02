@@ -106,6 +106,7 @@ All configuration is via environment variables:
 | `PEER_ENDORSE_INTERVAL` | `45` | Seconds between trust endorsements                           |
 | `ARCHIVE_ENABLED` | `false` | Archive notifications to SQLite                              |
 | `ARCHIVE_PATH` | `listener_archive.db` | SQLite archive location (WAL mode — expect `-wal`/`-shm` sidecar files, and make the containing directory writable) |
+| `ARCHIVE_RETENTION_DAYS` | `30` | Days of notifications to keep. Older rows are deleted once an hour, in small batches. `0` keeps everything. A delete does not shrink the file: SQLite reuses the space. To get the disk space back once, stop the listener and run `sqlite3 <ARCHIVE_PATH> VACUUM` |
 | `CATCHUP_ENABLED` | `false` | Fetch missed notifications from peer archives on join        |
 | `SSE_ENABLED` | `false` | Serve notifications as SSE                                   |
 | `SSE_BIND_ADDR` | `0.0.0.0:8089` | SSE listen address                                           |
