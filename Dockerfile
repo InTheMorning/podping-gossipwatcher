@@ -10,6 +10,7 @@ WORKDIR /src
 
 COPY Cargo.toml Cargo.lock /src/
 COPY podping-gossipwatcher /src/podping-gossipwatcher
+COPY vendor /src/vendor
 
 RUN cargo build --release --locked -p podping-gossipwatcher
 

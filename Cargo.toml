@@ -1,3 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["podping-gossipwatcher"]
+exclude = ["vendor/iroh"]
+
+# iroh 1.0.3 with the retry-queue fix of n0-computer/iroh#4390. See vendor/README.md.
+[patch.crates-io]
+iroh = { path = "vendor/iroh" }
