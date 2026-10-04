@@ -214,6 +214,16 @@ impl PeerSuggest {
     }
 }
 
+/// The OS name in a peer announce. A Linux build on glibc runs on a GNU userland,
+/// so it reports "GNU+linux". Each other build reports `std::env::consts::OS`.
+fn announce_os() -> &'static str {
+    if cfg!(all(target_os = "linux", target_env = "gnu")) {
+        "GNU+linux"
+    } else {
+        std::env::consts::OS
+    }
+}
+
 impl PeerAnnounce {
     fn new(node_id: &str, version: &str, friendly_name: Option<String>, metrics: AnnounceMetrics) -> Self {
         let timestamp = SystemTime::now()
@@ -239,7 +249,7 @@ impl PeerAnnounce {
             msgs_sent: metrics.msgs_sent,
             last_msg_age_secs: metrics.last_msg_age_secs,
             reconnect_count: metrics.reconnect_count,
-            os: Some(std::env::consts::OS.to_string()),
+            os: Some(announce_os().to_string()),
             arch: Some(std::env::consts::ARCH.to_string()),
             build_type: Some(if cfg!(debug_assertions) { "debug" } else { "release" }.to_string()),
             iroh_version: option_env!("IROH_VERSION").map(str::to_string),
@@ -2347,6 +2357,17 @@ mod tests {
         hasher.update(TOPIC_STRING.as_bytes());
         let hash: [u8; 32] = hasher.finalize()[..32].try_into().unwrap();
         assert_eq!(TOPIC_ID_BYTES, hash);
+    }
+
+    #[test]
+    fn announce_publishes_gnu_linux_on_a_glibc_build() {
+        let a = PeerAnnounce::new("node", "0.0.0", None, AnnounceMetrics::default());
+        let expected = if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            "GNU+linux"
+        } else {
+            std::env::consts::OS
+        };
+        assert_eq!(a.os.as_deref(), Some(expected));
     }
 
     #[test]
