@@ -11,6 +11,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Each job gets a read-only token unless it states more.
+permissions:
+  contents: read
+
 jobs:
   image:
     # Only in this fork. Upstream publishes with release.yml.
@@ -20,11 +24,11 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -33,7 +37,7 @@ jobs:
       # main and sha-<commit> for each push to main; the version for a tag.
       # Pin sha-<commit> on a host, so it is clear which build runs.
       - id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/podping-gossipwatcher
           tags: |
@@ -41,7 +45,7 @@ jobs:
             type=sha,format=short
             type=semver,pattern={{version}}
 
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: linux/amd64
